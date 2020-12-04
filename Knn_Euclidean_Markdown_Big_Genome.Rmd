@@ -1,0 +1,244 @@
+---
+title: "Intent_HQ_Markdown_Euclidean_Big_Dataset_Genome"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Top 10 most similar movies
+
+The objective is to take a movie title as input and respond with the top-K most similar movies using the MovieLens <https://grouplens.org/datasets/movielens/> dataset
+
+For this exercise I'll be using the **Big MovieLens Latest** Dataset. 
+
+
+
+
+```{r reading, echo = TRUE, results = 'hide', warning= FALSE, error=FALSE,message=FALSE}
+rm(list = ls())
+
+
+library(dplyr)
+library(knn.covertree)
+library(tm)
+
+#Reading the datasets
+path = "C:/Users/pedro.e.sequera/Desktop/Intent HQ - Movie Similarity/ml-latest/"
+
+links = read.csv(paste0(path,"links.csv"),header = T)
+movies = read.csv(paste0(path,"movies.csv"),header = T)
+ratings = read.csv(paste0(path,"ratings.csv"),header = T)
+genome = read.csv(paste0(path,"genome-scores.csv"),header=T)
+genome_tags = read.csv(paste0(path,"genome-tags.csv"),header=T) #14M rows
+
+
+```
+
+
+Below are some extracts of each of the CSV files. For this exercise we will use the tag genome data which encodes how strongly movies exhibit particular properties represented by tags (atmospheric, thought-provoking, realistic, etc.)
+
+### RATINGS
+```{r Ratings }
+head(ratings)
+```
+
+### MOVIES
+```{r Movies }
+head(movies)
+```
+
+### TAGS GENOME
+```{r TAGS }
+head(genome)
+```
+
+### LINKS
+```{r LINKS }
+head(links)
+```
+
+## Methodology 
+
+The methodology used here to identify the 10 most similar movies ot each movie is the **k-Nearest Neighbor (K-NN)**. For that, we will take advantage of the **find_knn** function from the *knn.covertree* package in **R** 
+
+Recommenders identify items that are similar to each other or online users with similar preferences. In order to do this, the recommender needs a framework with which to first compare users or items, and then identify those that are most similar to each other. This is where the k-Nearest Neighbor (k-NN) algorithm comes to use.
+
+k-NN is a machine learning algorithm that inputs items or users as data points in a feature space. It then seeks to solve the following query: given (N) objects in the feature space, find the (k) most similar objects or neighbors. The k-NN algorithm then identifies the (k) most similar objects by locating the data points that are closest in proximity to the (N) objects.
+
+To locate data points to the items we are testing, k-NN must employ some type of metric to measure the distance between the data points in the feature space. This **distance metric** is the key method a recommender uses to identify items or users that are similar to each other. 
+
+Final results are based on the **Euclidean** distance metric
+
+## Preprocessing
+The input for the **find_nn** algorithm is a data frame where each row represents a unique *movieId* and the columns are the **ratings**, **genre** and **tag** attributes.
+Each dataset will be processed independently and then joined by *movieID*
+
+### RATINGS Dataset
+For each *movieID* we will estimate the average rating by user and the number of users that rated that movie. 
+We will then normalize each vector on a min-max scale 
+```{r ratings norm }
+#Writing a normalizing function
+ ##the normalization function is created
+ nor <-function(x) { (x -min(x))/(max(x)-min(x))   }
+
+ratings.matrix = ratings %>%
+  group_by(movieId) %>%
+  summarise(rating_avg = mean(rating),rating_number = length(rating)) %>%
+  mutate(rating_avg_norm = nor(rating_avg),rating_number_norm = nor(rating_number)) %>%
+  select(one_of(c("movieId","rating_avg_norm","rating_number_norm")))
+
+head(ratings.matrix)
+
+
+
+```
+
+
+### GENRE 
+For genres we will create a Document Term Matrix, where each row is a *movieID* and each column is an indicator column for each genre, where 1 indicates that the movie corresponds to a specific genre and 0 if it doesn't
+```{r Genre preprocess }
+genre.list = strsplit(as.character(movies$genres),split="\\|")
+
+
+docs <- as.VCorpus(genre.list)
+
+docs <- tm_map(docs, PlainTextDocument)
+
+dtm = DocumentTermMatrix(docs)
+
+dtm.matrix = as.matrix(dtm) #9742 22
+
+#removing redudant variables and renaming
+genre.matrix = cbind.data.frame(data.frame(movies$movieId),dtm.matrix[,-1])
+names(genre.matrix)[1] = "movieID"
+names(genre.matrix)[15] = "Not Listed"
+rownames(genre.matrix) = NULL
+
+
+head(genre.matrix)
+
+```
+
+
+
+### Tag Genome
+Reshaping the Genome Score table into wide format
+```{r Tags preprocessing}
+
+#Reshaping into wide format 
+tags.matrix = reshape(genome,idvar = "movieId",timevar="tagId",direction="wide" )
+names(tags.matrix) = c("movieID",paste(genome_tags$tag,"_Relevance",sep=""))
+
+
+
+
+rownames(tags.matrix) = NULL
+
+
+head(tags.matrix)[,30:40]
+
+```
+
+
+### Joining all Datasets into a single Data Frame
+
+**Genre** has **58,098** movieIDs  
+**Ratings** has **53,889** movieIDs  
+**Tags** has **13,176** movieIDs
+
+```{r joining}
+final.df.stage = left_join(genre.matrix,ratings.matrix,by=c("movieID" = "movieId"))
+
+final.df = left_join(final.df.stage,tags.matrix,by="movieID") #9742 by 1766
+
+#Replacing NAs with 0's
+final.df[is.na(final.df)] = 0
+
+head(final.df)[,1:30]
+
+```
+
+### Creating the Top 10 most similar movies
+The function estimates the pairwise **Cosine** distance between all movieIDs and then sorts from lower to higher distances.
+Additional processing is needed to translate the matric from indices to titles
+
+```{r knn algorithm}
+p = find_knn(final.df[,-1],10)
+
+
+# #Creating table to translate index into title
+temp = left_join(final.df,movies,by = c("movieID" = "movieId")) %>%
+   select(one_of(c("movieID","title")))
+
+#The function output yields a matrix with the indices 
+top10_nn =p$index
+
+#Retrieving the distances
+top10_nn_dist = p$dist
+
+#translating movieIDs into Titles
+top10_nn_title = top10_nn
+
+
+title <- function(x) {
+  return(temp[x,2])
+} 
+
+top10_nn_title = as.data.frame(apply(top10_nn, 2, title))
+
+
+
+#Final datafame
+top10_nn_final = cbind.data.frame(data.frame(temp[,2]),top10_nn_title)
+names(top10_nn_final) = c("Movie Title",paste0("top",(1:10)))
+
+top10_nn_final_dist = cbind.data.frame(data.frame(temp[,2]),top10_nn_dist)
+names(top10_nn_final_dist) = names(top10_nn_final)
+
+t(head(top10_nn_final))
+
+```
+
+
+```{r exportingr,echo=FALSE }
+
+
+
+write.csv(top10_nn_final,paste0(path,"Top10nn_euclidean_big_genome.csv"))
+write.csv(top10_nn_final_dist,paste0(path,"Top10nn_euclidean_big_genome_dist.csv"))
+```
+
+
+
+
+### Writing the final function and Displaying the Output
+
+
+```{r final function }
+top10_nn_function = function(title){
+  top10_vector = top10_nn_final[which(top10_nn_final$`Movie Title` %in% title),2:11]
+  top10_dist = data.frame(top10_nn_dist[which(top10_nn_final$`Movie Title` %in% title),])
+  
+  top10.df = cbind.data.frame(c(t(top10_vector)),c(top10_dist))
+  names(top10.df) = c("Top 10 Movie Titles","Euclidean Distance")
+  rownames(top10.df) = paste0("top",(1:10))
+  return(top10.df)
+  
+}
+
+
+```
+
+
+### Displaying the output for "Sense and Sensibility (1995)"
+
+```{r }
+
+top10_nn_function("Sense and Sensibility (1995)")
+
+```
+
