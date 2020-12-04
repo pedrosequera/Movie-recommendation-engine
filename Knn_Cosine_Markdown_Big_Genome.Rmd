@@ -1,5 +1,5 @@
 ---
-title: "Intent_HQ_Markdown_Cosine_Big_Dataset_Genome"
+title: "Markdown_Cosine_Big_Dataset_Genome"
 output:
   html_document: default
   word_document: default
